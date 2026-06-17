@@ -1,0 +1,39 @@
+[package]
+name = "feedback-cli"
+description = "Configurable error/feedback/perf reporting for CLIs built on mcp-cli: route structured events to a caco webhook, the caco CLI, or a local sink, selected from project config."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+readme = "README.md"
+repository = "https://github.com/harryaskham/feedback-cli"
+homepage = "https://github.com/harryaskham/feedback-cli"
+keywords = ["cli", "feedback", "webhook", "mcp", "reporting"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "feedback_cli"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1", features = ["derive"] }
+# Ecosystem crate — pulled from github:harryaskham/* (not vendored) so the whole
+# stack updates together. Consuming flakes rewrite this `git`/`branch` pin via a
+# flake input + `[patch]`; `nix flake update` moves it in lockstep.
+mcp-cli = { git = "https://github.com/harryaskham/mcp-cli", branch = "main" }
+# HTTP client for the webhook reporting strategy. Mirrors updatable-cli's choice
+# so the ecosystem shares one TLS stack.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"

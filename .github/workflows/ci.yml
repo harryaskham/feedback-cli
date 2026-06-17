@@ -1,0 +1,46 @@
+name: CI
+
+# Build + test on the self-hosted Linux fleet (where Nix + the private crate
+# input is available). This lane is the build/test catch.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: nix build + flake check
+    runs-on: [self-hosted, linux, x86_64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Nix is available
+        shell: bash
+        run: nix --version
+
+      # The ecosystem crate (mcp-cli) is a PRIVATE git flake input. The
+      # self-hosted runner must be able to fetch it:
+      #   - the flake input uses git+ssh:// and authenticates via the runner's
+      #     SSH key;
+      #   - the Cargo.toml git dep is https://, so rewrite https->ssh so
+      #     buildRustPackage's fetchGit can use the same key.
+      - name: Configure private-crate git auth (https -> ssh)
+        shell: bash
+        run: |
+          git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+
+      - name: Build the library
+        shell: bash
+        run: nix build .#feedback-cli --no-write-lock-file
+
+      - name: Run flake checks (build + unit + doc tests)
+        shell: bash
+        run: nix flake check --no-write-lock-file
