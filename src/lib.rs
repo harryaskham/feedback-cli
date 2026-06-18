@@ -1254,13 +1254,43 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let read = stream.read(&mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            // Read until the full request (headers + Content-Length body) is in
+            // hand; a single read() can return just the headers before the body
+            // arrives in a later TCP segment.
+            let mut data = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        data.extend_from_slice(&tmp[..n]);
+                        let text = String::from_utf8_lossy(&data);
+                        if let Some(hdr_end) = text.find("\r\n\r\n") {
+                            let body_len = text[..hdr_end]
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    if name.trim().eq_ignore_ascii_case("content-length") {
+                                        value.trim().parse::<usize>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            if data.len() >= hdr_end + 4 + body_len {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            request
+            String::from_utf8_lossy(&data).to_string()
         });
 
         let sink = WebhookSink::from_config(&WebhookConfig {

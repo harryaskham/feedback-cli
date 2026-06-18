@@ -68,6 +68,54 @@ reporter.report_error("my-tool", &MyError)?;
 # Ok::<(), feedback_cli::FeedbackError>(())
 ```
 
+## Webhook payload contract
+
+The `webhook` strategy sends **one HTTP request per event**:
+
+- method `POST` (override with `method`), `Content-Type: application/json`;
+- `Authorization: Bearer <token>` when a token is configured (`token` or `token_env`);
+- extra `headers` if configured;
+- body = the JSON serialization of a `FeedbackEvent`.
+
+A non-2xx response (or transport error) surfaces as `FeedbackError::Http`; a 2xx
+is success. It is up to the receiver (e.g. a caco webhook) to decide the action.
+
+Example error-event body:
+
+```json
+{
+  "kind": "error",
+  "component": "build",
+  "summary": "linker failed",
+  "detail": "ld: symbol not found",
+  "severity": "error",
+  "labels": ["category:execution_failure"],
+  "fields": { "crate": "acme-cli" },
+  "fingerprint": "ld_symbol_not_found",
+  "project": "acme",
+  "timestamp_unix_ms": 1750000000000
+}
+```
+
+| field | type | notes |
+|---|---|---|
+| `kind` | `"error"` \| `"exception"` \| `"perf"` \| `"info"` | required; maps to the caco surface |
+| `component` | string | required; source/subsystem |
+| `summary` | string | required |
+| `severity` | `"info"`\|`"warning"`\|`"error"`\|`"critical"` | optional |
+| `detail` | string | optional body/stack/context |
+| `labels` | string[] | optional; omitted when empty |
+| `fields` | object<string,string> | optional; omitted when empty |
+| `fingerprint` | string | optional dedupe key |
+| `project` | string | optional |
+| `metric` | `{ name, value, unit?, threshold?, baseline? }` | present on `perf` events |
+| `timestamp_unix_ms` | number (u64) | always present; ms since the Unix epoch |
+
+Optional fields are omitted when `None`/empty. Suggested receiver mapping:
+`error`/`exception` → create a bead and/or `caco log error`; `perf` →
+`caco log perf`; `info` → log or drop. See `cargo run --example report` for a
+live dump of these payloads.
+
 ## Expose over MCP
 
 Mirroring `updatable-cli`, [`register_feedback_tools`] mounts `feedback_report`
