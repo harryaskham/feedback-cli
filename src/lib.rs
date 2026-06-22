@@ -307,6 +307,75 @@ impl FeedbackEvent {
     pub fn to_json(&self) -> Result<String, FeedbackError> {
         serde_json::to_string(self).map_err(|err| FeedbackError::Serialization(err.to_string()))
     }
+
+    /// Render this event as a caco bead-create body matching the caco webhook
+    /// `bead` handler's native fields (`title`, `description`, `type`,
+    /// `priority`, `labels`).
+    ///
+    /// `summary` becomes the bead title; `detail` plus a structured context
+    /// footer becomes the description; `kind`/`severity` choose the bead type
+    /// and priority. Used by the [`WebhookPayload::CacoBead`] payload mode.
+    #[must_use]
+    pub fn to_caco_bead(&self) -> serde_json::Value {
+        let bead_type = match self.kind {
+            FeedbackKind::Error | FeedbackKind::Exception => "bug",
+            FeedbackKind::Perf | FeedbackKind::Info => "task",
+        };
+        let priority = match self.severity {
+            Some(Severity::Critical) => 1,
+            Some(Severity::Warning) => 3,
+            Some(Severity::Info) => 4,
+            Some(Severity::Error) | None => 2,
+        };
+        let mut labels = vec![
+            "feedback".to_owned(),
+            format!("kind:{}", self.kind.as_str()),
+        ];
+        for label in &self.labels {
+            if !labels.contains(label) {
+                labels.push(label.clone());
+            }
+        }
+        let mut context = vec![format!("component: {}", self.component)];
+        if let Some(severity) = self.severity {
+            context.push(format!("severity: {}", severity.as_str()));
+        }
+        if let Some(fingerprint) = &self.fingerprint {
+            context.push(format!("fingerprint: {fingerprint}"));
+        }
+        if let Some(project) = &self.project {
+            context.push(format!("project: {project}"));
+        }
+        for (key, value) in &self.fields {
+            context.push(format!("{key}: {value}"));
+        }
+        if let Some(metric) = &self.metric {
+            let unit = metric.unit.as_deref().unwrap_or("");
+            context.push(format!("metric {}: {}{}", metric.name, metric.value, unit));
+        }
+        context.push(format!("timestamp_unix_ms: {}", self.timestamp_unix_ms));
+        let footer = context.join("\n");
+        let description = match &self.detail {
+            Some(detail) if !detail.is_empty() => format!("{detail}\n\n{footer}"),
+            _ => footer,
+        };
+        serde_json::json!({
+            "title": self.summary,
+            "description": description,
+            "type": bead_type,
+            "priority": priority,
+            "labels": labels,
+        })
+    }
+
+    /// Render [`FeedbackEvent::to_caco_bead`] as a compact JSON string.
+    ///
+    /// # Errors
+    /// Returns [`FeedbackError::Serialization`] if the value cannot be encoded.
+    pub fn to_caco_bead_json(&self) -> Result<String, FeedbackError> {
+        serde_json::to_string(&self.to_caco_bead())
+            .map_err(|err| FeedbackError::Serialization(err.to_string()))
+    }
 }
 
 /// A destination for [`FeedbackEvent`]s. Implement this to forward events to a
@@ -352,6 +421,20 @@ impl FeedbackSink for StderrSink {
     }
 }
 
+/// Selects the JSON body shape the [`WebhookSink`] POSTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookPayload {
+    /// POST the native [`FeedbackEvent`] JSON (default). Lossless; the receiver
+    /// maps fields (a caco webhook can set `bead.title_from = "summary"`).
+    #[default]
+    Event,
+    /// POST a caco bead-create body (`title`/`description`/`type`/`priority`/
+    /// `labels`) matching the caco webhook `bead` handler's native fields, so no
+    /// receiver-side field mapping is needed. See [`FeedbackEvent::to_caco_bead`].
+    CacoBead,
+}
+
 /// A sink that POSTs each event as JSON to a configured webhook URL.
 #[derive(Debug, Clone)]
 pub struct WebhookSink {
@@ -360,6 +443,7 @@ pub struct WebhookSink {
     method: String,
     timeout_secs: u64,
     headers: BTreeMap<String, String>,
+    payload: WebhookPayload,
 }
 
 impl WebhookSink {
@@ -369,12 +453,26 @@ impl WebhookSink {
     /// Returns [`FeedbackError::Config`] if the URL is empty or the token cannot
     /// be resolved from its environment variable.
     pub fn from_config(config: &WebhookConfig) -> Result<Self, FeedbackError> {
+        Self::from_config_for(config, None)
+    }
+
+    /// Like [`WebhookSink::from_config`] but resolves the conventional
+    /// `CACOPHONY_<PROJECT>_WEBHOOK_TOKEN` env var for `project` when no inline
+    /// `token`/`token_env` is set.
+    ///
+    /// # Errors
+    /// Returns [`FeedbackError::Config`] if the URL is empty or an explicit
+    /// `token_env` is set but unreadable.
+    pub fn from_config_for(
+        config: &WebhookConfig,
+        project: Option<&str>,
+    ) -> Result<Self, FeedbackError> {
         if config.url.trim().is_empty() {
             return Err(FeedbackError::Config(
                 "webhook url must not be empty".to_owned(),
             ));
         }
-        let token = config.resolve_token()?;
+        let token = config.resolve_token_for(project)?;
         Ok(Self {
             url: config.url.clone(),
             token,
@@ -385,13 +483,17 @@ impl WebhookSink {
                 .to_uppercase(),
             timeout_secs: config.timeout_secs.unwrap_or(30),
             headers: config.headers.clone(),
+            payload: config.payload,
         })
     }
 }
 
 impl FeedbackSink for WebhookSink {
     fn record(&self, event: &FeedbackEvent) -> Result<(), FeedbackError> {
-        let payload = event.to_json()?;
+        let payload = match self.payload {
+            WebhookPayload::Event => event.to_json()?,
+            WebhookPayload::CacoBead => event.to_caco_bead_json()?,
+        };
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(timeout)
@@ -581,14 +683,38 @@ pub struct WebhookConfig {
     /// Extra headers sent with every request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// The JSON body shape to POST (default: the native event JSON).
+    #[serde(default)]
+    pub payload: WebhookPayload,
 }
 
 impl WebhookConfig {
-    /// Resolve the bearer token from the inline value or the named env var.
+    /// Resolve the bearer token using only the inline value or an explicit
+    /// `token_env` (no conventional fallback). Equivalent to
+    /// [`WebhookConfig::resolve_token_for`] with no project.
     ///
     /// # Errors
     /// Returns [`FeedbackError::Config`] if `token_env` is set but unreadable.
     pub fn resolve_token(&self) -> Result<Option<String>, FeedbackError> {
+        self.resolve_token_for(None)
+    }
+
+    /// Resolve the bearer token. Precedence:
+    /// 1. inline `token`,
+    /// 2. explicit `token_env` (errors if the named var is unset),
+    /// 3. the conventional env vars `CACOPHONY_<PROJECT>_WEBHOOK_TOKEN` (when a
+    ///    `project` is known) then `CACOPHONY_WEBHOOK_TOKEN`.
+    ///
+    /// Returns `None` when no token is configured or discoverable (an
+    /// unauthenticated webhook).
+    ///
+    /// # Errors
+    /// Returns [`FeedbackError::Config`] if an explicit `token_env` is set but
+    /// the named variable is not present.
+    pub fn resolve_token_for(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Option<String>, FeedbackError> {
         if let Some(token) = &self.token {
             return Ok(Some(token.clone()));
         }
@@ -600,8 +726,41 @@ impl WebhookConfig {
                 ))),
             };
         }
+        for var in conventional_token_env_vars(project) {
+            if let Ok(value) = std::env::var(&var) {
+                if !value.is_empty() {
+                    return Ok(Some(value));
+                }
+            }
+        }
         Ok(None)
     }
+}
+
+/// The conventional webhook bearer-token env var names, most specific first:
+/// `CACOPHONY_<PROJECT>_WEBHOOK_TOKEN` (when `project` is set) then the generic
+/// `CACOPHONY_WEBHOOK_TOKEN`. The project is upper-cased with non-alphanumeric
+/// characters replaced by `_`.
+#[must_use]
+pub fn conventional_token_env_vars(project: Option<&str>) -> Vec<String> {
+    let mut vars = Vec::new();
+    if let Some(project) = project {
+        let slug: String = project
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if slug.chars().any(|c| c != '_') {
+            vars.push(format!("CACOPHONY_{slug}_WEBHOOK_TOKEN"));
+        }
+    }
+    vars.push("CACOPHONY_WEBHOOK_TOKEN".to_owned());
+    vars
 }
 
 /// caco-cli reporting strategy configuration.
@@ -639,11 +798,16 @@ impl ReportStrategy {
     /// # Errors
     /// Returns a [`FeedbackError`] if the strategy is misconfigured (e.g. a
     /// webhook with an empty URL or an unresolvable token env var).
-    pub fn build_sink(&self) -> Result<Box<dyn FeedbackSink>, FeedbackError> {
+    pub fn build_sink(
+        &self,
+        default_project: Option<&str>,
+    ) -> Result<Box<dyn FeedbackSink>, FeedbackError> {
         Ok(match self {
             ReportStrategy::Disabled => Box::new(NullSink),
             ReportStrategy::Stderr => Box::new(StderrSink),
-            ReportStrategy::Webhook(config) => Box::new(WebhookSink::from_config(config)?),
+            ReportStrategy::Webhook(config) => {
+                Box::new(WebhookSink::from_config_for(config, default_project)?)
+            }
             ReportStrategy::CacoCli(config) => Box::new(CacoCliSink::from_config(config)),
         })
     }
@@ -737,10 +901,13 @@ impl Reporter {
     #[must_use]
     pub fn from_config(config: &FeedbackConfig) -> Self {
         let sink = if config.enabled {
-            config.strategy.build_sink().unwrap_or_else(|err| {
-                eprintln!("feedback-cli: disabling reporting: {err}");
-                Box::new(NullSink)
-            })
+            config
+                .strategy
+                .build_sink(config.project.as_deref())
+                .unwrap_or_else(|err| {
+                    eprintln!("feedback-cli: disabling reporting: {err}");
+                    Box::new(NullSink)
+                })
         } else {
             Box::new(NullSink)
         };
@@ -1176,6 +1343,89 @@ mod tests {
         let sink = WebhookSink::from_config(&cfg).unwrap();
         // Description must never leak the token.
         assert!(!sink.describe().contains("secret"));
+    }
+
+    #[test]
+    fn webhook_payload_defaults_to_event() {
+        let cfg: WebhookConfig = serde_json::from_str(r#"{"url":"https://h/x"}"#).unwrap();
+        assert_eq!(cfg.payload, WebhookPayload::Event);
+        let caco: WebhookConfig =
+            serde_json::from_str(r#"{"url":"https://h/x","payload":"caco_bead"}"#).unwrap();
+        assert_eq!(caco.payload, WebhookPayload::CacoBead);
+    }
+
+    #[test]
+    fn to_caco_bead_maps_event_to_bead_fields() {
+        let event = FeedbackEvent::error("build", "linker failed")
+            .with_detail("ld: symbol not found")
+            .with_field("crate", "acme")
+            .with_label("ci");
+        let bead = event.to_caco_bead();
+        assert_eq!(bead["title"], "linker failed");
+        assert_eq!(bead["type"], "bug"); // error -> bug
+        assert_eq!(bead["priority"], 2); // error severity -> 2
+        let labels: Vec<String> = bead["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(labels.contains(&"feedback".to_owned()));
+        assert!(labels.contains(&"kind:error".to_owned()));
+        assert!(labels.contains(&"ci".to_owned()));
+        let description = bead["description"].as_str().unwrap();
+        assert!(description.contains("ld: symbol not found"));
+        assert!(description.contains("component: build"));
+        assert!(description.contains("crate: acme"));
+
+        // perf -> task; info -> task; exception -> bug.
+        assert_eq!(
+            FeedbackEvent::perf("p", "slow", Metric::new("m", 1.0)).to_caco_bead()["type"],
+            "task"
+        );
+        assert_eq!(
+            FeedbackEvent::exception("x", "boom").to_caco_bead()["type"],
+            "bug"
+        );
+    }
+
+    #[test]
+    fn conventional_token_env_var_names() {
+        assert_eq!(
+            conventional_token_env_vars(Some("feedback-cli")),
+            vec![
+                "CACOPHONY_FEEDBACK_CLI_WEBHOOK_TOKEN".to_owned(),
+                "CACOPHONY_WEBHOOK_TOKEN".to_owned(),
+            ]
+        );
+        assert_eq!(
+            conventional_token_env_vars(None),
+            vec!["CACOPHONY_WEBHOOK_TOKEN".to_owned()]
+        );
+    }
+
+    #[test]
+    fn resolve_token_precedence_inline_and_explicit_env() {
+        // Inline token wins regardless of project.
+        let cfg = WebhookConfig {
+            url: "https://h/x".to_owned(),
+            token: Some("inline".to_owned()),
+            ..WebhookConfig::default()
+        };
+        assert_eq!(
+            cfg.resolve_token_for(Some("p")).unwrap().as_deref(),
+            Some("inline")
+        );
+        // An explicit but unset token_env is a hard error, not a silent fallback.
+        let cfg = WebhookConfig {
+            url: "https://h/x".to_owned(),
+            token_env: Some("DEFINITELY_UNSET_FBCLI_VAR_ZZ".to_owned()),
+            ..WebhookConfig::default()
+        };
+        assert!(matches!(
+            cfg.resolve_token_for(Some("p")),
+            Err(FeedbackError::Config(_))
+        ));
     }
 
     #[test]

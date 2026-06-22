@@ -116,6 +116,65 @@ Optional fields are omitted when `None`/empty. Suggested receiver mapping:
 `caco log perf`; `info` → log or drop. See `cargo run --example report` for a
 live dump of these payloads.
 
+## Wiring to a caco webhook
+
+caco ships a webhook ingress (`POST /hooks/<scope>/<hook-id>`) with a **bead**
+handler, so feedback-cli can create beads with zero custom server code. Two ways
+to shape the body:
+
+**A. Turnkey — `payload: "caco_bead"` (recommended).** feedback-cli POSTs a
+bead-create body (`title`/`description`/`type`/`priority`/`labels`) that matches
+the caco `bead` handler's native fields directly. `summary` becomes the title,
+`detail` + a structured context footer becomes the description, error/exception
+events become `bug`s, perf/info become `task`s, and severity maps to priority.
+
+```jsonc
+// feedback-cli config (in the host CLI's project config)
+{
+  "component": "my-cli",
+  "project": "my-project",
+  "strategy": {
+    "type": "webhook",
+    "url": "https://<node-or-funnel-host>/hooks/my-project/feedback",
+    "payload": "caco_bead"
+    // token resolved by convention (see below) or set token_env explicitly
+  }
+}
+```
+
+**B. Lossless — default `payload: "event"`.** feedback-cli POSTs the full
+`FeedbackEvent` JSON; the caco hook maps it with `bead.title_from: "summary"`
+(the raw event JSON becomes the description, `labels` map through).
+
+```yaml
+# caco config (operator-owned), illustrative
+webhooks:
+  port: 8444
+  funnel: true            # opt-in Tailscale Funnel exposure
+  token_env: CACOPHONY_WEBHOOK_TOKEN
+  hooks:
+    feedback:
+      bead:
+        project: my-project
+        labels: [feedback, external]
+        title_from: summary   # only needed for payload "event"
+```
+
+### Bearer token convention
+
+The caco webhook requires a bearer token. feedback-cli sends
+`Authorization: Bearer <token>` resolved in this order:
+
+1. inline `token`,
+2. explicit `token_env` (the named var must be set, else it errors),
+3. **convention** (when neither is set): `CACOPHONY_<PROJECT>_WEBHOOK_TOKEN`
+   (project upper-cased, non-alphanumerics → `_`) then `CACOPHONY_WEBHOOK_TOKEN`.
+
+So if the host sets `CACOPHONY_MY_PROJECT_WEBHOOK_TOKEN` (or the shared
+`CACOPHONY_WEBHOOK_TOKEN`) to the same secret the caco webhook accepts, a config
+with just `type`/`url`/`payload` authenticates automatically. The matching env
+var names are available programmatically via `conventional_token_env_vars`.
+
 ## Expose over MCP
 
 Mirroring `updatable-cli`, [`register_feedback_tools`] mounts `feedback_report`

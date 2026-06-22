@@ -34,9 +34,21 @@ fn main() {
     println!("// perf event webhook payload:");
     println!("{}", perf.to_json().expect("serialize perf event"));
 
-    // 2) Selecting a strategy purely from project config (serde).
+    // 1b) The SAME error event rendered as a caco bead-create body, i.e. what the
+    //     `caco_bead` payload mode POSTs (matches the caco webhook `bead` handler
+    //     fields directly, so no receiver-side title_from mapping is needed).
+    println!("// error event as a caco bead-create body (payload = caco_bead):");
+    println!(
+        "{}",
+        error.to_caco_bead_json().expect("serialize caco bead")
+    );
+
+    // 2) Selecting a strategy purely from project config (serde). Here: a caco
+    //    webhook with the turnkey caco_bead payload and the conventional token
+    //    env var. With no `token`/`token_env`, feedback-cli also auto-resolves
+    //    CACOPHONY_<PROJECT>_WEBHOOK_TOKEN then CACOPHONY_WEBHOOK_TOKEN.
     let config: FeedbackConfig = serde_json::from_str(
-        r#"{"component":"acme-cli","project":"acme","strategy":{"type":"webhook","url":"https://example.invalid/feedback","token_env":"ACME_FEEDBACK_TOKEN"}}"#,
+        r#"{"component":"acme-cli","project":"acme","strategy":{"type":"webhook","url":"https://host.example/hooks/acme/feedback","token_env":"CACOPHONY_ACME_WEBHOOK_TOKEN","payload":"caco_bead"}}"#,
     )
     .expect("parse config");
     assert!(matches!(config.strategy, ReportStrategy::Webhook(_)));
