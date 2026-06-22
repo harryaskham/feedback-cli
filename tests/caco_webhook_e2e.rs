@@ -1,5 +1,8 @@
 //! End-to-end integration test for the feedback-cli -> caco webhook path.
 //!
+//! Requires the default-on `webhook` cargo feature (the HTTP delivery path).
+#![cfg(feature = "webhook")]
+//!
 //! It stands up a mock caco `bead` webhook receiver on localhost that reads the
 //! posted body exactly the way `caco-daemon`'s `dispatch_bead` handler does
 //! (`title` / `description` / `type` / `priority` / `labels`), then drives

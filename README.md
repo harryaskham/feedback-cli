@@ -191,6 +191,21 @@ register_feedback_tools(&mut router, |_ctx: &Ctx| FeedbackConfig::from_env());
 assert!(router.tool_metadata().iter().any(|t| t.name == "feedback_report"));
 ```
 
+## Cargo features
+
+- `webhook` *(default)* — enables the `webhook` reporting strategy (HTTPS `POST`
+  via [`ureq`]). Disable it to drop the `ureq`/`rustls` TLS stack when a CLI only
+  uses the `stderr` / `caco_cli` / `disabled` strategies:
+
+  ```toml
+  feedback-cli = { git = "https://github.com/harryaskham/feedback-cli", default-features = false }
+  ```
+
+  With the feature off, `WebhookConfig` / `WebhookSink` still exist and build, but
+  delivery returns a config error instead of sending.
+
+[`ureq`]: https://docs.rs/ureq
+
 ## Development
 
 This crate is part of the harryaskham ecosystem and uses the shared nix-flake +

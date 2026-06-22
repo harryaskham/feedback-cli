@@ -25,7 +25,14 @@ schemars = { version = "1", features = ["derive"] }
 mcp-cli = { git = "https://github.com/harryaskham/mcp-cli", branch = "main" }
 # HTTP client for the webhook reporting strategy. Mirrors updatable-cli's choice
 # so the ecosystem shares one TLS stack.
-ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
+
+[features]
+default = ["webhook"]
+# The `webhook` strategy POSTs events over HTTPS via ureq. Disable it
+# (`default-features = false`) to drop the ureq/rustls TLS stack when only the
+# stderr / caco_cli / disabled strategies are used.
+webhook = ["dep:ureq"]
 
 [lints.rust]
 unsafe_code = "forbid"

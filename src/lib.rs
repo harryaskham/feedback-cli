@@ -436,7 +436,12 @@ pub enum WebhookPayload {
 }
 
 /// A sink that POSTs each event as JSON to a configured webhook URL.
+///
+/// Sending requires the default-on `webhook` cargo feature (ureq/TLS). Without
+/// it the sink still builds and serializes, but [`WebhookSink::record`] returns
+/// a config error rather than pulling in the TLS stack.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "webhook"), allow(dead_code))]
 pub struct WebhookSink {
     url: String,
     token: Option<String>,
@@ -494,6 +499,19 @@ impl FeedbackSink for WebhookSink {
             WebhookPayload::Event => event.to_json()?,
             WebhookPayload::CacoBead => event.to_caco_bead_json()?,
         };
+        self.send(&payload)
+    }
+
+    fn describe(&self) -> String {
+        // Never include the token.
+        format!("webhook {} {}", self.method, self.url)
+    }
+}
+
+impl WebhookSink {
+    /// POST the serialized payload over HTTPS via ureq.
+    #[cfg(feature = "webhook")]
+    fn send(&self, payload: &str) -> Result<(), FeedbackError> {
         let timeout = std::time::Duration::from_secs(self.timeout_secs);
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(timeout)
@@ -509,7 +527,7 @@ impl FeedbackSink for WebhookSink {
         for (name, value) in &self.headers {
             request = request.set(name, value);
         }
-        match request.send_string(&payload) {
+        match request.send_string(payload) {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(code, _)) => Err(FeedbackError::Http(format!(
                 "webhook {} returned status {code}",
@@ -522,9 +540,15 @@ impl FeedbackSink for WebhookSink {
         }
     }
 
-    fn describe(&self) -> String {
-        // Never include the token.
-        format!("webhook {} {}", self.method, self.url)
+    /// Stub used when the `webhook` feature is disabled: building and serializing
+    /// still work, but delivery returns a clear config error instead of pulling
+    /// in a TLS stack.
+    #[cfg(not(feature = "webhook"))]
+    #[allow(clippy::unused_self)]
+    fn send(&self, _payload: &str) -> Result<(), FeedbackError> {
+        Err(FeedbackError::Config(
+            "webhook reporting requires the `webhook` cargo feature".to_owned(),
+        ))
     }
 }
 
@@ -1496,6 +1520,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "webhook")]
     fn webhook_sink_posts_event_with_auth_header() {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
