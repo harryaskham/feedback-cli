@@ -16,6 +16,7 @@ code change.
 |---|---|
 | `webhook`   | POST each event as JSON to a URL with an optional bearer token. The CLI is a **webhook consumer**: it calls the endpoint and the receiver (e.g. a caco webhook) decides what to do — create a bead, log a `caco` error/perf/exception, page someone, … |
 | `caco_cli`  | Shell out to the local `caco` CLI (`caco log error` / `caco log perf`), optionally also filing a bead. |
+| `file`      | Append one JSON line per event to a configured path (durable local log; parent dirs created). |
 | `stderr`    | Write one JSON line per event to stderr (the default). |
 | `disabled`  | Drop every event. |
 

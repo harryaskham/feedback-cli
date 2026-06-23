@@ -801,6 +801,61 @@ pub struct CacoCliConfig {
     pub create_beads: bool,
 }
 
+/// File reporting strategy configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileConfig {
+    /// Path to append JSON-lines events to (one JSON object per line).
+    pub path: String,
+}
+
+/// A sink that appends one JSON line per event to a file (created if missing,
+/// parent directories created as needed).
+#[derive(Debug, Clone)]
+pub struct FileSink {
+    path: std::path::PathBuf,
+}
+
+impl FileSink {
+    /// Build a file sink from a resolved [`FileConfig`].
+    ///
+    /// # Errors
+    /// Returns [`FeedbackError::Config`] if the path is empty.
+    pub fn from_config(config: &FileConfig) -> Result<Self, FeedbackError> {
+        if config.path.trim().is_empty() {
+            return Err(FeedbackError::Config(
+                "file path must not be empty".to_owned(),
+            ));
+        }
+        Ok(Self {
+            path: std::path::PathBuf::from(&config.path),
+        })
+    }
+}
+
+impl FeedbackSink for FileSink {
+    fn record(&self, event: &FeedbackEvent) -> Result<(), FeedbackError> {
+        use std::io::Write as _;
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    FeedbackError::Io(format!("create dir {}: {err}", parent.display()))
+                })?;
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|err| FeedbackError::Io(format!("open {}: {err}", self.path.display())))?;
+        writeln!(file, "{}", event.to_json()?)
+            .map_err(|err| FeedbackError::Io(format!("write {}: {err}", self.path.display())))
+    }
+
+    fn describe(&self) -> String {
+        format!("file {}", self.path.display())
+    }
+}
+
 /// How a [`Reporter`] delivers events. This is the unit that project config sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -814,6 +869,8 @@ pub enum ReportStrategy {
     Webhook(WebhookConfig),
     /// Shell out to the local `caco` CLI.
     CacoCli(CacoCliConfig),
+    /// Append one JSON line per event to a file.
+    File(FileConfig),
 }
 
 impl ReportStrategy {
@@ -833,6 +890,7 @@ impl ReportStrategy {
                 Box::new(WebhookSink::from_config_for(config, default_project)?)
             }
             ReportStrategy::CacoCli(config) => Box::new(CacoCliSink::from_config(config)),
+            ReportStrategy::File(config) => Box::new(FileSink::from_config(config)?),
         })
     }
 }
@@ -1013,6 +1071,8 @@ pub enum FeedbackError {
     Command(String),
     /// The reporting strategy was misconfigured.
     Config(String),
+    /// A local I/O operation (e.g. writing the file sink) failed.
+    Io(String),
 }
 
 impl FeedbackError {
@@ -1022,6 +1082,7 @@ impl FeedbackError {
             FeedbackError::Serialization(_) => "feedback_serialization_failed",
             FeedbackError::Command(_) => "feedback_command_failed",
             FeedbackError::Config(_) => "feedback_config_invalid",
+            FeedbackError::Io(_) => "feedback_io_failed",
         }
     }
 
@@ -1030,7 +1091,8 @@ impl FeedbackError {
             FeedbackError::Http(m)
             | FeedbackError::Serialization(m)
             | FeedbackError::Command(m)
-            | FeedbackError::Config(m) => m,
+            | FeedbackError::Config(m)
+            | FeedbackError::Io(m) => m,
         }
     }
 }
@@ -1046,7 +1108,9 @@ impl std::error::Error for FeedbackError {}
 impl StructuredError for FeedbackError {
     fn category(&self) -> ErrorCategory {
         match self {
-            FeedbackError::Http(_) | FeedbackError::Command(_) => ErrorCategory::ExecutionFailure,
+            FeedbackError::Http(_) | FeedbackError::Command(_) | FeedbackError::Io(_) => {
+                ErrorCategory::ExecutionFailure
+            }
             FeedbackError::Serialization(_) => ErrorCategory::SerializationError,
             FeedbackError::Config(_) => ErrorCategory::ConfigError,
         }
@@ -1210,6 +1274,7 @@ fn strategy_name(strategy: &ReportStrategy) -> &'static str {
         ReportStrategy::Stderr => "stderr",
         ReportStrategy::Webhook(_) => "webhook",
         ReportStrategy::CacoCli(_) => "caco_cli",
+        ReportStrategy::File(_) => "file",
     }
 }
 
@@ -1450,6 +1515,43 @@ mod tests {
             cfg.resolve_token_for(Some("p")),
             Err(FeedbackError::Config(_))
         ));
+    }
+
+    #[test]
+    fn file_sink_appends_json_lines() {
+        let path = std::env::temp_dir().join(format!(
+            "feedback-cli-test-{}-{}.jsonl",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let sink = FileSink::from_config(&FileConfig {
+            path: path.display().to_string(),
+        })
+        .unwrap();
+        sink.record(&FeedbackEvent::error("svc", "one")).unwrap();
+        sink.record(&FeedbackEvent::info("svc", "two")).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"summary\":\"one\""));
+        assert!(lines[1].contains("\"summary\":\"two\""));
+        assert!(sink.describe().starts_with("file "));
+
+        // empty path is a config error
+        assert!(matches!(
+            FileSink::from_config(&FileConfig {
+                path: String::new()
+            }),
+            Err(FeedbackError::Config(_))
+        ));
+
+        // the strategy round-trips from config and names correctly
+        let cfg: FeedbackConfig =
+            serde_json::from_str(r#"{"strategy":{"type":"file","path":"/tmp/x.jsonl"}}"#).unwrap();
+        assert!(matches!(cfg.strategy, ReportStrategy::File(_)));
+        assert_eq!(strategy_name(&cfg.strategy), "file");
     }
 
     #[test]
