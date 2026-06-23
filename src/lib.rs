@@ -435,20 +435,122 @@ pub enum WebhookPayload {
     CacoBead,
 }
 
-/// A sink that POSTs each event as JSON to a configured webhook URL.
-///
-/// Sending requires the default-on `webhook` cargo feature (ureq/TLS). Without
-/// it the sink still builds and serializes, but [`WebhookSink::record`] returns
-/// a config error rather than pulling in the TLS stack.
+/// POST parameters for a webhook, shared by the sync and async delivery paths.
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "webhook"), allow(dead_code))]
-pub struct WebhookSink {
+struct WebhookTarget {
     url: String,
     token: Option<String>,
     method: String,
     timeout_secs: u64,
     headers: BTreeMap<String, String>,
+}
+
+/// Deliver one serialized payload to `target` over HTTPS via ureq.
+#[cfg(feature = "webhook")]
+fn deliver_webhook(target: &WebhookTarget, payload: &str) -> Result<(), FeedbackError> {
+    let timeout = std::time::Duration::from_secs(target.timeout_secs);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build();
+    let mut request = agent
+        .request(&target.method, &target.url)
+        .set("Content-Type", "application/json");
+    if let Some(token) = &target.token {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    }
+    for (name, value) in &target.headers {
+        request = request.set(name, value);
+    }
+    match request.send_string(payload) {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, _)) => Err(FeedbackError::Http(format!(
+            "webhook {} returned status {code}",
+            target.url
+        ))),
+        Err(err) => Err(FeedbackError::Http(format!(
+            "webhook {} failed: {err}",
+            target.url
+        ))),
+    }
+}
+
+/// Stub used when the `webhook` feature is disabled: building and serializing
+/// still work, but delivery returns a clear config error instead of pulling in a
+/// TLS stack.
+#[cfg(not(feature = "webhook"))]
+fn deliver_webhook(_target: &WebhookTarget, _payload: &str) -> Result<(), FeedbackError> {
+    Err(FeedbackError::Config(
+        "webhook reporting requires the `webhook` cargo feature".to_owned(),
+    ))
+}
+
+/// How a [`WebhookSink`] delivers events.
+#[derive(Debug)]
+enum Delivery {
+    /// Deliver inline on the calling thread (default).
+    Sync,
+    /// Deliver on a background worker thread (best-effort; flushed on drop).
+    #[cfg(feature = "webhook")]
+    Async {
+        sender: Option<std::sync::mpsc::SyncSender<String>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    },
+}
+
+#[cfg(feature = "webhook")]
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        if let Delivery::Async { sender, worker } = self {
+            // Closing the channel lets the worker drain and exit; joining then
+            // flushes any queued events before the sink goes away.
+            sender.take();
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+/// Construct the delivery mode for a sink. Async delivery requires the `webhook`
+/// feature; otherwise (or when `blocking`) delivery is synchronous.
+fn build_delivery(config: &WebhookConfig, target: &WebhookTarget) -> Delivery {
+    #[cfg(feature = "webhook")]
+    if !config.blocking {
+        let capacity = config.queue_capacity.unwrap_or(256).max(1);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(capacity);
+        let worker_target = target.clone();
+        let worker = std::thread::spawn(move || {
+            while let Ok(payload) = receiver.recv() {
+                let _ = deliver_webhook(&worker_target, &payload);
+            }
+        });
+        return Delivery::Async {
+            sender: Some(sender),
+            worker: Some(worker),
+        };
+    }
+    let _ = (config, target);
+    Delivery::Sync
+}
+
+/// A sink that POSTs each event as JSON to a configured webhook URL.
+///
+/// Sending requires the default-on `webhook` cargo feature (ureq/TLS). Without
+/// it the sink still builds and serializes, but [`WebhookSink::record`] returns
+/// a config error rather than pulling in the TLS stack.
+///
+/// Delivery is synchronous by default. Set `blocking = false` on the
+/// [`WebhookConfig`] to deliver on a bounded background queue so reporting never
+/// blocks the caller; queued events are flushed when the sink/reporter is dropped.
+#[derive(Debug)]
+#[cfg_attr(not(feature = "webhook"), allow(dead_code))]
+pub struct WebhookSink {
+    target: WebhookTarget,
     payload: WebhookPayload,
+    delivery: Delivery,
 }
 
 impl WebhookSink {
@@ -478,7 +580,7 @@ impl WebhookSink {
             ));
         }
         let token = config.resolve_token_for(project)?;
-        Ok(Self {
+        let target = WebhookTarget {
             url: config.url.clone(),
             token,
             method: config
@@ -488,7 +590,12 @@ impl WebhookSink {
                 .to_uppercase(),
             timeout_secs: config.timeout_secs.unwrap_or(30),
             headers: config.headers.clone(),
+        };
+        let delivery = build_delivery(config, &target);
+        Ok(Self {
+            target,
             payload: config.payload,
+            delivery,
         })
     }
 }
@@ -499,56 +606,30 @@ impl FeedbackSink for WebhookSink {
             WebhookPayload::Event => event.to_json()?,
             WebhookPayload::CacoBead => event.to_caco_bead_json()?,
         };
-        self.send(&payload)
+        match &self.delivery {
+            Delivery::Sync => deliver_webhook(&self.target, &payload),
+            #[cfg(feature = "webhook")]
+            Delivery::Async { sender, .. } => {
+                if let Some(sender) = sender {
+                    // Best-effort: enqueue without blocking; drop if the queue is full.
+                    let _ = sender.try_send(payload);
+                }
+                Ok(())
+            }
+        }
     }
 
     fn describe(&self) -> String {
         // Never include the token.
-        format!("webhook {} {}", self.method, self.url)
-    }
-}
-
-impl WebhookSink {
-    /// POST the serialized payload over HTTPS via ureq.
-    #[cfg(feature = "webhook")]
-    fn send(&self, payload: &str) -> Result<(), FeedbackError> {
-        let timeout = std::time::Duration::from_secs(self.timeout_secs);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(timeout)
-            .timeout_read(timeout)
-            .timeout_write(timeout)
-            .build();
-        let mut request = agent
-            .request(&self.method, &self.url)
-            .set("Content-Type", "application/json");
-        if let Some(token) = &self.token {
-            request = request.set("Authorization", &format!("Bearer {token}"));
-        }
-        for (name, value) in &self.headers {
-            request = request.set(name, value);
-        }
-        match request.send_string(payload) {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(code, _)) => Err(FeedbackError::Http(format!(
-                "webhook {} returned status {code}",
-                self.url
-            ))),
-            Err(err) => Err(FeedbackError::Http(format!(
-                "webhook {} failed: {err}",
-                self.url
-            ))),
-        }
-    }
-
-    /// Stub used when the `webhook` feature is disabled: building and serializing
-    /// still work, but delivery returns a clear config error instead of pulling
-    /// in a TLS stack.
-    #[cfg(not(feature = "webhook"))]
-    #[allow(clippy::unused_self)]
-    fn send(&self, _payload: &str) -> Result<(), FeedbackError> {
-        Err(FeedbackError::Config(
-            "webhook reporting requires the `webhook` cargo feature".to_owned(),
-        ))
+        let mode = match &self.delivery {
+            Delivery::Sync => "sync",
+            #[cfg(feature = "webhook")]
+            Delivery::Async { .. } => "async",
+        };
+        format!(
+            "webhook {} {} ({mode})",
+            self.target.method, self.target.url
+        )
     }
 }
 
@@ -687,7 +768,7 @@ impl FeedbackSink for CacoCliSink {
 }
 
 /// Webhook reporting strategy configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WebhookConfig {
     /// Endpoint to POST events to.
     pub url: String,
@@ -710,6 +791,32 @@ pub struct WebhookConfig {
     /// The JSON body shape to POST (default: the native event JSON).
     #[serde(default)]
     pub payload: WebhookPayload,
+    /// Deliver synchronously on the calling thread (default). Set false to
+    /// deliver on a bounded background queue so reporting never blocks the
+    /// caller; queued events are flushed when the sink/reporter is dropped. Only
+    /// honoured with the `webhook` cargo feature enabled.
+    #[serde(default = "default_true")]
+    pub blocking: bool,
+    /// Bounded queue capacity for async delivery (`blocking = false`); events
+    /// are dropped when the queue is full. Defaults to 256.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity: Option<usize>,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            token: None,
+            token_env: None,
+            method: None,
+            timeout_secs: None,
+            headers: BTreeMap::new(),
+            payload: WebhookPayload::default(),
+            blocking: true,
+            queue_capacity: None,
+        }
+    }
 }
 
 impl WebhookConfig {
@@ -1684,6 +1791,67 @@ mod tests {
         assert!(perf_cmds[0].contains(&"perf".to_owned()));
         assert!(perf_cmds[0].contains(&"--metric".to_owned()));
         assert!(perf_cmds[0].contains(&"latency".to_owned()));
+    }
+
+    #[test]
+    #[cfg(feature = "webhook")]
+    fn webhook_async_delivery_flushes_on_drop() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut data = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        data.extend_from_slice(&tmp[..n]);
+                        let text = String::from_utf8_lossy(&data);
+                        if let Some(hdr_end) = text.find("\r\n\r\n") {
+                            let body_len = text[..hdr_end]
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    if name.trim().eq_ignore_ascii_case("content-length") {
+                                        value.trim().parse::<usize>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            if data.len() >= hdr_end + 4 + body_len {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.flush();
+            String::from_utf8_lossy(&data).to_string()
+        });
+
+        let sink = WebhookSink::from_config(&WebhookConfig {
+            url: format!("http://{addr}/hook"),
+            blocking: false,
+            ..WebhookConfig::default()
+        })
+        .unwrap();
+        assert!(sink.describe().contains("(async)"));
+        sink.record(&FeedbackEvent::error("svc", "async-boom"))
+            .unwrap();
+        drop(sink); // flush: joins the worker, delivering the queued event
+
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("POST /hook"), "request: {request}");
+        assert!(request.contains("\"summary\":\"async-boom\""));
     }
 
     #[test]

@@ -20,6 +20,11 @@ code change.
 | `stderr`    | Write one JSON line per event to stderr (the default). |
 | `disabled`  | Drop every event. |
 
+The `webhook` strategy delivers **synchronously** by default; set
+`"blocking": false` in its config for best-effort **background** delivery that
+never stalls the CLI (bounded queue; queued events are flushed when the reporter
+is dropped).
+
 ## Configure from project config
 
 ```jsonc
