@@ -39,32 +39,48 @@
           mcp-cli = { path = "${mcp-cli}" }
         '';
 
-        feedbackCli = pkgs.rustPlatform.buildRustPackage {
-          pname = "feedback-cli";
-          version = "0.1.0";
-          src = ./.;
+        mkFeedbackCli =
+          extraArgs:
+          pkgs.rustPlatform.buildRustPackage (
+            {
+              pname = "feedback-cli";
+              version = "0.1.0";
+              src = ./.;
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            allowBuiltinFetchGit = true;
-          };
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+                allowBuiltinFetchGit = true;
+              };
 
-          # Inject the [patch] table so cargo resolves the ecosystem crate from
-          # the flake input instead of reaching out to the network.
-          postPatch = ''
-            mkdir -p .cargo
-            cat ${cargoConfig} >> .cargo/config.toml
-          '';
+              # Inject the [patch] table so cargo resolves the ecosystem crate from
+              # the flake input instead of reaching out to the network.
+              postPatch = ''
+                mkdir -p .cargo
+                cat ${cargoConfig} >> .cargo/config.toml
+              '';
 
-          # This is a library: there is no binary to install, but `cargo test`
-          # (run by buildRustPackage's checkPhase) is the primary gate, covering
-          # the unit tests AND the rustdoc doctests.
-          doCheck = true;
+              # This is a library: there is no binary to install, but `cargo test`
+              # (run by buildRustPackage's checkPhase) is the primary gate, covering
+              # the unit tests AND the rustdoc doctests.
+              doCheck = true;
 
-          meta = {
-            description = "Configurable error/feedback/perf reporting for CLIs built on the harryaskham mcp-cli stack";
-            license = lib.licenses.mit;
-          };
+              meta = {
+                description = "Configurable error/feedback/perf reporting for CLIs built on the harryaskham mcp-cli stack";
+                license = lib.licenses.mit;
+              };
+            }
+            // extraArgs
+          );
+
+        feedbackCli = mkFeedbackCli { };
+
+        # The same crate built with `--no-default-features` (the `webhook`
+        # feature off, so ureq/rustls is dropped). buildRustPackage applies
+        # buildNoDefaultFeatures to both the build and the checkPhase (cargo
+        # test), so this guards the feature-off path in CI.
+        feedbackCliNoWebhook = mkFeedbackCli {
+          pname = "feedback-cli-no-default-features";
+          buildNoDefaultFeatures = true;
         };
       in
       {
@@ -106,9 +122,11 @@
           ''}";
         };
 
-        # Sandbox-pure check: the library builds and its tests (unit + doctest)
-        # pass.
+        # Sandbox-pure checks: the library builds and its tests (unit + doctest)
+        # pass with the `webhook` feature on (default) and off
+        # (--no-default-features), so the feature-gated path cannot regress.
         checks.test = feedbackCli;
+        checks.no-default-features = feedbackCliNoWebhook;
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ feedbackCli ];
