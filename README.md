@@ -176,6 +176,22 @@ So if the host sets `CACOPHONY_MY_PROJECT_WEBHOOK_TOKEN` (or the shared
 with just `type`/`url`/`payload` authenticates automatically. The matching env
 var names are available programmatically via `conventional_token_env_vars`.
 
+## Panic hook
+
+Opt in to turn unhandled panics into exception feedback automatically — the
+literal "hook into exceptions" path:
+
+```rust
+use feedback_cli::{install_panic_hook, FeedbackConfig};
+
+fn main() {
+    install_panic_hook(&FeedbackConfig::from_env());
+    // ... the rest of your CLI. Any panic is now reported as a
+    // FeedbackKind::Exception event (with source location + thread) through the
+    // configured strategy, before the normal panic output / abort runs.
+}
+```
+
 ## Expose over MCP
 
 Mirroring `updatable-cli`, [`register_feedback_tools`] mounts `feedback_report`

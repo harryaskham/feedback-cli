@@ -1125,6 +1125,49 @@ impl StructuredError for FeedbackError {
     }
 }
 
+/// Install a global panic hook that reports each panic as a
+/// [`FeedbackKind::Exception`] event through `config`, then chains to the
+/// previously-installed hook (so the default panic message / abort behaviour is
+/// preserved).
+///
+/// Opt-in: call this once near the start of `main`. Reporting failures are
+/// swallowed, so installing the hook never changes the panic path itself.
+pub fn install_panic_hook(config: &FeedbackConfig) {
+    let reporter = Reporter::from_config(config);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = panic_payload_message(info.payload());
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
+        let _ = reporter.report(&panic_feedback_event(&message, location.as_deref()));
+        previous(info);
+    }));
+}
+
+/// Extract a human-readable message from a panic payload (`&str` / `String`).
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic".to_owned()
+    }
+}
+
+/// Build the [`FeedbackEvent`] for a panic with an optional source location.
+fn panic_feedback_event(message: &str, location: Option<&str>) -> FeedbackEvent {
+    let mut event = FeedbackEvent::exception("panic", message);
+    if let Some(location) = location {
+        event = event.with_field("location", location.to_owned());
+    }
+    if let Some(name) = std::thread::current().name() {
+        event = event.with_field("thread", name.to_owned());
+    }
+    event
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1552,6 +1595,28 @@ mod tests {
             serde_json::from_str(r#"{"strategy":{"type":"file","path":"/tmp/x.jsonl"}}"#).unwrap();
         assert!(matches!(cfg.strategy, ReportStrategy::File(_)));
         assert_eq!(strategy_name(&cfg.strategy), "file");
+    }
+
+    #[test]
+    fn panic_payload_message_extracts_str_and_string() {
+        let s: &(dyn std::any::Any + Send) = &"boom";
+        assert_eq!(panic_payload_message(s), "boom");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert_eq!(panic_payload_message(owned.as_ref()), "kaboom");
+        let other: &(dyn std::any::Any + Send) = &42i32;
+        assert_eq!(panic_payload_message(other), "panic");
+    }
+
+    #[test]
+    fn panic_feedback_event_is_an_exception_with_location() {
+        let event = panic_feedback_event("boom", Some("src/x.rs:1:2"));
+        assert_eq!(event.kind, FeedbackKind::Exception);
+        assert_eq!(event.summary, "boom");
+        assert_eq!(
+            event.fields.get("location").map(String::as_str),
+            Some("src/x.rs:1:2")
+        );
+        assert!(event.labels.iter().any(|l| l == "exception"));
     }
 
     #[test]
