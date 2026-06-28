@@ -1,7 +1,11 @@
 name: release
 
 # Triggered ONLY on a pushed version tag (v*) from `scripts/release.sh` (or
-# `nix run .#release`). Runs on the self-hosted fleet.
+# `nix run .#release`). Runs on the azure-ephemeral self-hosted pool: Nix +
+# flakes are preinstalled and provide all toolchains (including `gh`, fetched
+# via `nix run nixpkgs#gh` rather than requiring it on the runner image). The
+# pool is secretless + off-tailnet, so the private crate input is fetched with
+# the PRIVATE_DEPS_SSH_KEY deploy key.
 #
 # A library has no per-target binary assets (unlike a CLI). The release flow is:
 #   1. resolve  — derive the tag/version once.
@@ -54,6 +58,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Secretless/off-tailnet pool: inject the private-dep deploy key.
+      - name: Load private-dep SSH key
+        shell: bash
+        env:
+          PRIVATE_DEPS_SSH_KEY: ${{ secrets.PRIVATE_DEPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_DEPS_SSH_KEY:-}" ]; then
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            printf '%s\n' "$PRIVATE_DEPS_SSH_KEY" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          else
+            echo "::warning::PRIVATE_DEPS_SSH_KEY not set; relying on a runner-side key (fails on secretless runners)"
+          fi
       - name: Configure private-crate git auth (https -> ssh)
         shell: bash
         run: git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
@@ -75,10 +94,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure private-crate git auth (https -> ssh)
-        shell: bash
-        run: git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-
       - name: Create or update the GitHub Release
         shell: bash
         env:
@@ -86,13 +101,17 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
+          # `gh` is not on the secretless runner image — get it from Nix.
+          if ! nix run nixpkgs#gh -- release view "$TAG" >/dev/null 2>&1; then
+            nix run nixpkgs#gh -- release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
               --notes "feedback-cli $TAG" || true
           fi
 
       # Optional crates.io publish: only runs when the token secret is present,
       # so the workflow stays green for forks/private mirrors without one.
+      # (feedback-cli has a private git dep, which crates.io disallows, so this
+      # path is effectively a no-op until that dep is published; the tag +
+      # GitHub Release is the real artifact.)
       - name: Publish to crates.io (if token configured)
         shell: bash
         env:

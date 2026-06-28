@@ -1,7 +1,10 @@
 name: CI
 
-# Build + test on the self-hosted Linux fleet (where Nix + the private crate
-# input is available). This lane is the build/test catch.
+# Build + test via Nix (which provides ALL toolchains — nothing is required on
+# the runner image beyond Nix + flakes). Runs on the azure-ephemeral
+# self-hosted pool, which is SECRETLESS and NOT on the tailnet, so the private
+# `mcp-cli` git+ssh flake input is fetched with a deploy key injected from the
+# PRIVATE_DEPS_SSH_KEY GitHub Actions secret.
 
 on:
   push:
@@ -22,16 +25,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # azure-ephemeral runners carry no SSH key and are not on the tailnet, so
+      # inject a read-only deploy key (for the private mcp-cli input) from a
+      # secret. Soft when absent so the same workflow still works on a
+      # key-bearing self-hosted runner.
+      - name: Load private-dep SSH key
+        shell: bash
+        env:
+          PRIVATE_DEPS_SSH_KEY: ${{ secrets.PRIVATE_DEPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_DEPS_SSH_KEY:-}" ]; then
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            printf '%s\n' "$PRIVATE_DEPS_SSH_KEY" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh-keyscan -t rsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+          else
+            echo "::warning::PRIVATE_DEPS_SSH_KEY not set; relying on a runner-side key (fails on secretless runners)"
+          fi
+
       - name: Verify Nix is available
         shell: bash
         run: nix --version
 
-      # The ecosystem crate (mcp-cli) is a PRIVATE git flake input. The
-      # self-hosted runner must be able to fetch it:
-      #   - the flake input uses git+ssh:// and authenticates via the runner's
-      #     SSH key;
-      #   - the Cargo.toml git dep is https://, so rewrite https->ssh so
-      #     buildRustPackage's fetchGit can use the same key.
+      # The ecosystem crate (mcp-cli) is a PRIVATE git flake input fetched over
+      # SSH. The Cargo.toml git dep is https://, so rewrite https->ssh so
+      # buildRustPackage's fetchGit uses the injected key.
       - name: Configure private-crate git auth (https -> ssh)
         shell: bash
         run: |
