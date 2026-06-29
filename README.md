@@ -258,3 +258,16 @@ MIT.
 [`register_feedback_tools`]: https://docs.rs/feedback-cli
 [`ToolRouter`]: https://docs.rs/mcp-cli
 [`mcp_cli::StructuredError`]: https://docs.rs/mcp-cli
+
+## Platform clients (drop-in, same contract)
+
+Beyond the Rust crate, thin drop-in feedback clients live under per-language
+subprojects — all POST the identical webhook payload (`caco_bead` or `event`)
+to a caco bead hook with a bearer token, so any cacophony app can file beads:
+
+- `web/` — TypeScript (webapp), zero deps (`fetch`).
+- `ios/` — Swift (iPhone + macOS), Foundation only.
+- `android/` — Kotlin, `HttpURLConnection` only.
+
+Each is one file + README. The `caco_bead` mapping (type/priority/labels) mirrors
+`FeedbackEvent::to_caco_bead` exactly.
