@@ -75,7 +75,11 @@ export function toCacoBead(e: FeedbackEvent): Record<string, unknown> {
   if (e.severity) ctx.push(`severity: ${e.severity}`);
   if (e.fingerprint) ctx.push(`fingerprint: ${e.fingerprint}`);
   if (e.project) ctx.push(`project: ${e.project}`);
-  for (const [k, v] of Object.entries(e.fields ?? {})) ctx.push(`${k}: ${v}`);
+  // Sort fields by key to match the Rust contract (BTreeMap) and the iOS /
+  // Android clients, so a multi-field event renders an identical footer
+  // everywhere (the README promises this client mirrors to_caco_bead exactly).
+  for (const [k, v] of Object.entries(e.fields ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    ctx.push(`${k}: ${v}`);
   if (e.metric) ctx.push(`metric ${e.metric.name}: ${e.metric.value}${e.metric.unit ?? ""}`);
   ctx.push(`timestamp_unix_ms: ${e.timestampUnixMs ?? Date.now()}`);
   const footer = ctx.join("\n");
