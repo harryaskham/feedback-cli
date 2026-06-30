@@ -21,18 +21,18 @@
     "mcp-cli": {
       "flake": false,
       "locked": {
-        "lastModified": 1781648669,
-        "narHash": "sha256-JgHXMTUwg7m6ZLn+whOcVWvgFzEKzvYSzmNeuJJUWS0=",
+        "lastModified": 1782762432,
+        "narHash": "sha256-xhzRIfhtbmQ7ZIcmD2bGFH0IaVnD4wMRpa8VzDjmlWU=",
         "ref": "main",
-        "rev": "4cc82dcd1ed7abfc3d80833c87ada7884a5ced8a",
-        "revCount": 14,
+        "rev": "2e4efc172ed61cd861c228e99195c055ea7ff693",
+        "revCount": 25,
         "type": "git",
-        "url": "ssh://git@github.com/harryaskham/mcp-cli"
+        "url": "https://github.com/harryaskham/mcp-cli"
       },
       "original": {
         "ref": "main",
         "type": "git",
-        "url": "ssh://git@github.com/harryaskham/mcp-cli"
+        "url": "https://github.com/harryaskham/mcp-cli"
       }
     },
     "nixpkgs": {

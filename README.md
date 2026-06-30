@@ -241,8 +241,8 @@ nix run .#doctor              # verify project conventions
 nix run .#release -- patch    # bump version, tag, and trigger release.yml
 ```
 
-Plain cargo also works on a host that can fetch the private `mcp-cli` git
-dependency (configure `url."ssh://git@github.com/".insteadOf "https://github.com/"`):
+Plain cargo also works — the only dependency (`mcp-cli`) is a public git repo
+fetched over HTTPS, so no SSH key or token is needed:
 
 ```sh
 cargo fmt --all --check

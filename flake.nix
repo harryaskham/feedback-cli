@@ -10,10 +10,11 @@
     # consume the source (flake = false) and wire it into the cargo build via
     # `[patch]` so the build is fully offline/reproducible inside the nix sandbox.
     #
-    # Private repo, fetched over SSH (git+ssh://) — nix's git fetcher uses the
-    # host's git/SSH key auth, no GitHub token required.
+    # Public repo, fetched over HTTPS (git+https://) — no SSH key, deploy key,
+    # or GitHub token required, so this builds on secretless CI runners
+    # (e.g. the azure-ephemeral pool) without any credential setup.
     mcp-cli = {
-      url = "git+ssh://git@github.com/harryaskham/mcp-cli?ref=main";
+      url = "git+https://github.com/harryaskham/mcp-cli?ref=main";
       flake = false;
     };
   };
