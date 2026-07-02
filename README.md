@@ -181,6 +181,40 @@ So if the host sets `CACOPHONY_MY_PROJECT_WEBHOOK_TOKEN` (or the shared
 with just `type`/`url`/`payload` authenticates automatically. The matching env
 var names are available programmatically via `conventional_token_env_vars`.
 
+### Configure from environment (`FeedbackConfig::from_env`)
+
+For CLIs that prefer env over a config file, `FeedbackConfig::from_env()` builds
+the config from environment variables. The webhook endpoint is resolved in this
+order:
+
+1. `FEEDBACK_WEBHOOK_URL` — used verbatim as the full endpoint.
+2. `FEEDBACK_WEBHOOK_BASE_URL` — a shared hook-namespace base, joined with a
+   per-source **sub-path** so each project posts to its own path under one
+   namespace (`<base>/tendril`, `<base>/omni-cli`, …). The sub-path is the first
+   set of `FEEDBACK_WEBHOOK_HOOK`, `FEEDBACK_PROJECT`, then `FEEDBACK_COMPONENT`
+   (with none set, it posts to the bare base). The base's trailing `/` and the
+   sub-path's leading `/` are normalized.
+
+With neither set, the strategy defaults to `stderr`. Also read:
+`FEEDBACK_WEBHOOK_TOKEN_ENV` (env var holding the bearer token), and
+`FEEDBACK_COMPONENT` / `FEEDBACK_PROJECT` (event defaults; `FEEDBACK_PROJECT` also
+seeds the sub-path above).
+
+This makes the recommended **one token + one global hook namespace + per-project
+sub-path** setup pure env config — each project shares the base URL and token and
+only varies its sub-path:
+
+```sh
+# shared across all projects (e.g. from sops):
+export CACOPHONY_FEEDBACK_TOKEN="…"
+export FEEDBACK_WEBHOOK_TOKEN_ENV=CACOPHONY_FEEDBACK_TOKEN
+export FEEDBACK_WEBHOOK_BASE_URL="http://<node-or-funnel-host>:11300/hooks/global"
+# per project — picks its own sub-path:
+export FEEDBACK_PROJECT=tendril          # POSTs to …/hooks/global/tendril
+# or set it explicitly, independent of the event project default:
+export FEEDBACK_WEBHOOK_HOOK=tendril
+```
+
 ## Panic hook
 
 Opt in to turn unhandled panics into exception feedback automatically — the

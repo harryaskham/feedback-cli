@@ -1031,30 +1031,83 @@ impl Default for FeedbackConfig {
     }
 }
 
+/// Join a shared webhook-namespace base URL with an optional per-source
+/// sub-path. Pure helper for [`FeedbackConfig::from_env`] (testable without
+/// touching process env). The base's trailing `/` and the hook's leading `/`
+/// are normalized so exactly one separator is used; an empty/whitespace hook
+/// yields the bare base.
+fn join_webhook_base(base: &str, hook: Option<&str>) -> String {
+    let base = base.trim_end_matches('/');
+    match hook.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(hook) => format!("{base}/{}", hook.trim_start_matches('/')),
+        None => base.to_owned(),
+    }
+}
+
+/// Resolve the webhook endpoint for [`FeedbackConfig::from_env`] from
+/// already-read env values (pure; testable without process env). Precedence: a
+/// non-empty full URL wins; otherwise a non-empty base URL is joined with the
+/// first non-empty of hook / project / component as the sub-path; otherwise
+/// `None` (the caller falls back to stderr).
+fn resolve_webhook_url(
+    full_url: Option<&str>,
+    base_url: Option<&str>,
+    hook: Option<&str>,
+    project: Option<&str>,
+    component: Option<&str>,
+) -> Option<String> {
+    let nonempty = |s: &&str| !s.trim().is_empty();
+    if let Some(full) = full_url.filter(nonempty) {
+        return Some(full.to_owned());
+    }
+    let base = base_url.filter(nonempty)?;
+    let sub = hook
+        .filter(nonempty)
+        .or_else(|| project.filter(nonempty))
+        .or_else(|| component.filter(nonempty));
+    Some(join_webhook_base(base, sub))
+}
+
 impl FeedbackConfig {
-    /// Construct a webhook config from environment variables, intended as a
-    /// convenience for CLIs that prefer env over a config file.
+    /// Construct a config from environment variables, intended as a convenience
+    /// for CLIs that prefer env over a config file.
     ///
-    /// Reads (when present):
-    /// - `FEEDBACK_WEBHOOK_URL` → enables the webhook strategy,
+    /// Webhook endpoint resolution (first match wins):
+    /// - `FEEDBACK_WEBHOOK_URL` → used verbatim as the full endpoint.
+    /// - `FEEDBACK_WEBHOOK_BASE_URL` → a shared hook-namespace base joined with
+    ///   a per-source sub-path, so each project posts to its own path under one
+    ///   namespace (e.g. `<base>/tendril`, `<base>/omni-cli`). The sub-path is
+    ///   the first set of `FEEDBACK_WEBHOOK_HOOK`, `FEEDBACK_PROJECT`, or
+    ///   `FEEDBACK_COMPONENT`; with none set it posts to the bare base.
+    ///
+    /// Also reads (when present):
     /// - `FEEDBACK_WEBHOOK_TOKEN_ENV` → the env var holding the bearer token,
-    /// - `FEEDBACK_COMPONENT`, `FEEDBACK_PROJECT` → defaults.
+    /// - `FEEDBACK_COMPONENT`, `FEEDBACK_PROJECT` → event defaults (and
+    ///   `FEEDBACK_PROJECT` is the default webhook sub-path above).
     ///
-    /// When `FEEDBACK_WEBHOOK_URL` is unset the strategy defaults to stderr.
+    /// When neither `FEEDBACK_WEBHOOK_URL` nor `FEEDBACK_WEBHOOK_BASE_URL` is
+    /// set the strategy defaults to stderr.
     #[must_use]
     pub fn from_env() -> Self {
         let component = std::env::var("FEEDBACK_COMPONENT").ok();
         let project = std::env::var("FEEDBACK_PROJECT").ok();
-        let strategy =
-            std::env::var("FEEDBACK_WEBHOOK_URL")
-                .ok()
-                .map_or(ReportStrategy::Stderr, |url| {
-                    ReportStrategy::Webhook(WebhookConfig {
-                        url,
-                        token_env: std::env::var("FEEDBACK_WEBHOOK_TOKEN_ENV").ok(),
-                        ..WebhookConfig::default()
-                    })
-                });
+        let full_url = std::env::var("FEEDBACK_WEBHOOK_URL").ok();
+        let base_url = std::env::var("FEEDBACK_WEBHOOK_BASE_URL").ok();
+        let hook = std::env::var("FEEDBACK_WEBHOOK_HOOK").ok();
+        let url = resolve_webhook_url(
+            full_url.as_deref(),
+            base_url.as_deref(),
+            hook.as_deref(),
+            project.as_deref(),
+            component.as_deref(),
+        );
+        let strategy = url.map_or(ReportStrategy::Stderr, |url| {
+            ReportStrategy::Webhook(WebhookConfig {
+                url,
+                token_env: std::env::var("FEEDBACK_WEBHOOK_TOKEN_ENV").ok(),
+                ..WebhookConfig::default()
+            })
+        });
         Self {
             enabled: true,
             component,
@@ -1640,6 +1693,85 @@ mod tests {
         assert_eq!(
             conventional_token_env_vars(None),
             vec!["CACOPHONY_WEBHOOK_TOKEN".to_owned()]
+        );
+    }
+
+    #[test]
+    fn join_webhook_base_builds_namespace_subpaths() {
+        // Base + sub-path -> exactly one separator.
+        assert_eq!(
+            join_webhook_base("http://h:11300/hooks/global", Some("tendril")),
+            "http://h:11300/hooks/global/tendril"
+        );
+        // Trailing slash on base and leading slash on hook are normalized.
+        assert_eq!(
+            join_webhook_base("http://h/hooks/global/", Some("/omni-cli")),
+            "http://h/hooks/global/omni-cli"
+        );
+        // No / empty / whitespace hook -> bare base (trailing slash trimmed).
+        assert_eq!(
+            join_webhook_base("http://h/hooks/global/", None),
+            "http://h/hooks/global"
+        );
+        assert_eq!(
+            join_webhook_base("http://h/hooks/global", Some("  ")),
+            "http://h/hooks/global"
+        );
+    }
+
+    #[test]
+    fn resolve_webhook_url_precedence_and_subpath_fallback() {
+        let base = "http://helsinki:11300/hooks/global";
+        // Full URL wins over everything.
+        assert_eq!(
+            resolve_webhook_url(
+                Some("http://full/url"),
+                Some(base),
+                Some("h"),
+                Some("p"),
+                Some("c")
+            ),
+            Some("http://full/url".to_owned())
+        );
+        // Explicit hook wins over project/component for the sub-path.
+        assert_eq!(
+            resolve_webhook_url(
+                None,
+                Some(base),
+                Some("tendril"),
+                Some("proj"),
+                Some("comp")
+            ),
+            Some(format!("{base}/tendril"))
+        );
+        // Project is the sub-path when no explicit hook (the canonical model).
+        assert_eq!(
+            resolve_webhook_url(None, Some(base), None, Some("omni-cli"), Some("comp")),
+            Some(format!("{base}/omni-cli"))
+        );
+        // Component is the last-resort sub-path.
+        assert_eq!(
+            resolve_webhook_url(None, Some(base), None, None, Some("my-cli")),
+            Some(format!("{base}/my-cli"))
+        );
+        // Base with no derivable sub-path -> bare base.
+        assert_eq!(
+            resolve_webhook_url(None, Some(base), None, None, None),
+            Some(base.to_owned())
+        );
+        // Empty/whitespace full URL is treated as unset and falls through to base.
+        assert_eq!(
+            resolve_webhook_url(Some(""), Some(base), None, Some("p"), None),
+            Some(format!("{base}/p"))
+        );
+        // Neither full URL nor base -> None (stderr fallback).
+        assert_eq!(
+            resolve_webhook_url(None, None, Some("h"), Some("p"), Some("c")),
+            None
+        );
+        assert_eq!(
+            resolve_webhook_url(Some("  "), Some("  "), None, None, None),
+            None
         );
     }
 
