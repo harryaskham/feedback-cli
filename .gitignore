@@ -1,8 +1,3 @@
 /target
 **/*.rs.bk
 /.direnv/
-
-# Cacophony managed-agent runtime artefacts (session summaries, screenshots,
-# casts). These are published to the summaries/state surface by the daemon and
-# must never enter product history.
-/.cacophony/
