@@ -1,3 +1,14 @@
 /target
 **/*.rs.bk
 /.direnv/
+
+# `nix build` output symlinks (`-o result-foo` variants included). These point
+# into /nix/store and are machine-local, so committing one dirties every
+# checkout that builds and leaves a dangling link in fresh clones.
+#
+# NOTE: do NOT extend this to `/.cacophony/`. Managed-agent session artefacts
+# under `.cacophony/agent/**` are discovered by diffing COMMITTED content on the
+# agent branch, so ignoring them silently drops every summary with no error
+# (bd-f08617 reverted exactly that in 8703865).
+/result
+/result-*
