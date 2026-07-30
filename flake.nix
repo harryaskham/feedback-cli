@@ -12,7 +12,7 @@
     #
     # Public repo, fetched over HTTPS (git+https://) — no SSH key, deploy key,
     # or GitHub token required, so this builds on secretless CI runners
-    # (e.g. the azure-ephemeral pool) without any credential setup.
+    # without any credential setup.
     mcp-cli = {
       url = "git+https://github.com/harryaskham/mcp-cli?ref=main";
       flake = false;

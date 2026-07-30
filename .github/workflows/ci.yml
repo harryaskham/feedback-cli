@@ -3,7 +3,15 @@ name: CI
 # Build + test via Nix, which provides ALL toolchains (nothing required on the
 # runner image beyond Nix + flakes). The only ecosystem dependency, mcp-cli, is
 # a PUBLIC repo fetched over HTTPS, so this needs no SSH key, deploy key, or
-# token — it builds as-is on the secretless azure-ephemeral pool.
+# token — it builds as-is on a secretless runner.
+#
+# Runs on feedback-cli's own repo-scoped persistent NixOS runners (label set
+# [self-hosted, nix, x86_64-linux] = feedback-cli-ms-dev{,-2..-6}/pocket4), NOT
+# the shared azure-ephemeral pool (bd-26bdac): this repo has ZERO runners
+# carrying the `azure-ephemeral` label, so every job targeting it sat unassigned
+# until the 24h queue timeout auto-cancelled it. Persistent NixOS boxes also run
+# Nix sandboxed by default, which the azure-ephemeral image does not (tendril
+# bd-acf75f), so pure `nix build` / `nix flake check` is a better fit here.
 
 on:
   push:
@@ -19,8 +27,10 @@ concurrency:
 jobs:
   build-test:
     name: nix build + flake check
-    runs-on: [self-hosted, azure-ephemeral]
-    timeout-minutes: 30
+    runs-on: [self-hosted, nix, x86_64-linux]
+    # Cold-cache `nix build` + `nix flake check` on a freshly-provisioned node
+    # can exceed the old 30m budget; tendril uses the same 60m on this pool.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
