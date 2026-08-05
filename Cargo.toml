@@ -19,10 +19,11 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = { version = "1", features = ["derive"] }
-# Ecosystem crate — pulled from github:harryaskham/* (not vendored) so the whole
-# stack updates together. Consuming flakes rewrite this `git`/`branch` pin via a
-# flake input + `[patch]`; `nix flake update` moves it in lockstep.
-mcp-cli = { git = "https://github.com/harryaskham/mcp-cli", branch = "main" }
+# Ecosystem crate — pulled from github:harryaskham/* (not vendored). The package
+# was renamed to mcp-cli-core while retaining the `mcp_cli` Rust library name,
+# so source imports stay stable. Pin the reviewed package generation; consuming
+# flakes rewrite it to a path dependency for sandbox-pure builds.
+mcp-cli = { package = "mcp-cli-core", git = "https://github.com/harryaskham/mcp-cli", rev = "81e55235df7d7335d4dc7bd1095131246d157a2a" }
 # HTTP client for the webhook reporting strategy. Mirrors updatable-cli's choice
 # so the ecosystem shares one TLS stack.
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
