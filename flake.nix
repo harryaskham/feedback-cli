@@ -6,15 +6,15 @@
     flake-utils.url = "github:numtide/flake-utils";
 
     # Ecosystem crate pulled in directly from github:harryaskham/* — NOT
-    # vendored. `nix flake update` moves it in lockstep with everything else. We
-    # consume the source (flake = false) and wire it into the cargo build via
+    # vendored. Keep this on the same reviewed package generation as Cargo.toml.
+    # We consume the source (flake = false) and wire it into the cargo build via
     # `[patch]` so the build is fully offline/reproducible inside the nix sandbox.
     #
     # Public repo, fetched over HTTPS (git+https://) — no SSH key, deploy key,
     # or GitHub token required, so this builds on secretless CI runners
     # without any credential setup.
     mcp-cli = {
-      url = "git+https://github.com/harryaskham/mcp-cli?ref=main";
+      url = "git+https://github.com/harryaskham/mcp-cli?rev=81e55235df7d7335d4dc7bd1095131246d157a2a";
       flake = false;
     };
   };
@@ -35,9 +35,10 @@
 
         # `[patch]` redirects every `https://github.com/harryaskham/mcp-cli` git
         # reference in the dependency graph to the pinned flake-input source tree.
+        # The package is mcp-cli-core; the dependency key/library stays mcp-cli.
         cargoConfig = pkgs.writeText "feedback-cli-cargo-config.toml" ''
           [patch."https://github.com/harryaskham/mcp-cli"]
-          mcp-cli = { path = "${mcp-cli}" }
+          mcp-cli-core = { path = "${mcp-cli}" }
         '';
 
         mkFeedbackCli =
