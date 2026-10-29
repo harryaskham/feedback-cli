@@ -30,7 +30,7 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
 
         # `[patch]` redirects every `https://github.com/harryaskham/mcp-cli` git
